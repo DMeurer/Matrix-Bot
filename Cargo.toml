@@ -1,0 +1,20 @@
+[package]
+name = "Matrix-Bot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+matrix-sdk = { version = "0.7", features = ["e2e-encryption", "sqlite"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = "0.12"
+scraper = "0.21"
+regex = "1"
+chrono = "0.4"
+anyhow = "1"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# bundle SQLite so it doesn't need a system install
+libsqlite3-sys = { version = "0.27", features = ["bundled"] }
