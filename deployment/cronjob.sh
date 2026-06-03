@@ -6,4 +6,4 @@ mkdir -p deployment/logs
 
 LOCK_FILE="/tmp/matrix-bot.lockfile"
 
-flock -n "$LOCK_FILE" deployment/check-updates.sh >> "deployment/logs/cronjob.log" 2>&1
+flock -n "$LOCK_FILE" sh deployment/check-updates.sh >> "deployment/logs/cronjob.log" 2>&1

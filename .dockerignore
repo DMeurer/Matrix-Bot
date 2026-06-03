@@ -1,0 +1,19 @@
+# Build artifacts
+target/
+
+# Secrets — never bake into image
+.env
+
+# Runtime state — mounted as a volume instead
+session/
+
+# Git & IDE
+.git/
+.github/
+.idea/
+
+# Deployment scripts — not needed inside the container
+deployment/
+
+# Docs
+*.md
