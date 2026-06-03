@@ -1,0 +1,7 @@
+services:
+  matrix-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./session:/app/session
