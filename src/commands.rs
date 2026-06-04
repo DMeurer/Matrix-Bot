@@ -27,6 +27,45 @@ pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
     }
 }
 
+pub fn handle_help(body: &str) -> String {
+    let arg = body
+        .splitn(2, ' ')
+        .nth(1)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match arg {
+        None => {
+            "Verfügbare Befehle:\n\n\
+             mensa <tag>    – Zeigt den Speiseplan der Mensa Furtwangen\n\
+             help <befehl>  – Zeigt Hilfe zu einem Befehl\n\n\
+             Tipp: `help <befehl>` für mehr Details"
+                .to_string()
+        }
+        Some("mensa") => {
+            "mensa <tag>\n\n\
+             Zeigt den Speiseplan der Mensa Furtwangen (HFU).\n\n\
+             Parameter:\n\
+             (kein)  – Heutiger Tag\n\
+             0       – Ganze Woche (Mo–Sa)\n\
+             1       – Montag\n\
+             2       – Dienstag\n\
+             3       – Mittwoch\n\
+             4       – Donnerstag\n\
+             5       – Freitag\n\
+             6       – Samstag\n\n\
+             Beispiele:\n\
+             mensa    → Heute\n\
+             mensa 0  → Ganze Woche\n\
+             mensa 3  → Mittwoch"
+                .to_string()
+        }
+        Some(s) => {
+            format!("Unbekannter Befehl: \"{s}\". Verfügbare Befehle: mensa")
+        }
+    }
+}
+
 pub async fn handle_mensa(body: &str) -> String {
     let arg = body
         .splitn(2, ' ')
@@ -88,5 +127,26 @@ mod tests {
     fn parse_day_arg_invalid() {
         assert!(parse_mensa_arg(Some("7")).is_err());
         assert!(parse_mensa_arg(Some("foo")).is_err());
+    }
+
+    #[test]
+    fn help_no_arg_lists_commands() {
+        let result = handle_help("help");
+        assert!(result.contains("mensa"));
+        assert!(result.contains("help"));
+    }
+
+    #[test]
+    fn help_mensa_shows_days() {
+        let result = handle_help("help mensa");
+        assert!(result.contains("Montag"));
+        assert!(result.contains("Samstag"));
+        assert!(result.contains("mensa 0"));
+    }
+
+    #[test]
+    fn help_unknown_command() {
+        let result = handle_help("help foobar");
+        assert!(result.contains("foobar"));
     }
 }

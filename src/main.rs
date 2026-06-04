@@ -112,26 +112,36 @@ async fn main() -> Result<()> {
                 let body_lower = text_content.body.trim().to_lowercase();
                 let is_direct = room.is_direct().await.unwrap_or(false);
 
-                // In DMs trigger on "mensa …", in group rooms on "<botname> mensa …"
-                let mensa_body = if is_direct {
-                    if body_lower.starts_with("mensa") {
+                // Returns true if `body` is exactly `cmd` or starts with `cmd ` (with a space).
+                // Prevents "mensa????" from matching "mensa".
+                let is_cmd = |body: &str, cmd: &str| {
+                    body == cmd || body.starts_with(&format!("{cmd} "))
+                };
+
+                // In DMs trigger on "mensa …" / "help …"
+                // In group rooms trigger on "<botname> mensa …" / "<botname> help …"
+                let command_body: &str = if is_direct {
+                    if is_cmd(&body_lower, "mensa") || is_cmd(&body_lower, "help") {
                         body_lower.as_str()
                     } else {
                         return;
                     }
                 } else {
-                    let prefix = format!("{bot_name} mensa");
-                    if body_lower.starts_with(&prefix) {
-                        // strip the bot-name prefix so handle_mensa sees "mensa …"
-                        body_lower
-                            .strip_prefix(&format!("{bot_name} "))
-                            .unwrap_or(&body_lower)
+                    let prefix = format!("{bot_name} ");
+                    if is_cmd(&body_lower, &format!("{bot_name} mensa"))
+                        || is_cmd(&body_lower, &format!("{bot_name} help"))
+                    {
+                        body_lower.strip_prefix(&prefix).unwrap_or(&body_lower)
                     } else {
                         return;
                     }
                 };
 
-                let response = commands::handle_mensa(mensa_body).await;
+                let response = if command_body.starts_with("mensa") {
+                    commands::handle_mensa(command_body).await
+                } else {
+                    commands::handle_help(command_body)
+                };
 
                 if let Err(e) = room
                     .send(RoomMessageEventContent::text_plain(response))
