@@ -109,7 +109,13 @@ async fn main() -> Result<()> {
                     return;
                 };
 
-                let body_lower = text_content.body.trim().to_lowercase();
+                let raw_body = text_content.body.trim();
+                // U+202E Right-to-Left Override: if present, mirror it onto the response
+                let is_rlo = raw_body.starts_with('\u{202E}');
+                let body_lower = raw_body
+                    .trim_start_matches('\u{202E}')
+                    .trim()
+                    .to_lowercase();
                 let is_direct = room.is_direct().await.unwrap_or(false);
 
                 // Returns true if `body` is exactly `cmd` or starts with `cmd ` (with a space).
@@ -137,11 +143,15 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let response = if command_body.starts_with("mensa") {
+                let mut response = if command_body.starts_with("mensa") {
                     commands::handle_mensa(command_body).await
                 } else {
                     commands::handle_help(command_body)
                 };
+
+                if is_rlo {
+                    response.insert(0, '\u{202E}');
+                }
 
                 if let Err(e) = room
                     .send(RoomMessageEventContent::text_plain(response))
