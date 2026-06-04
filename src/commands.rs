@@ -86,7 +86,7 @@ pub fn handle_help(body: &str, show_restricted: bool) -> String {
         Some("allow") => {
             "allow <@nutzer:server>\n\n\
              Fügt einen Matrix-Nutzer zur Erlaubtenliste hinzu.\n\
-             Nur verfügbar für bereits erlaubte Nutzer (im privaten Chat).\n\n\
+             Nur verfügbar für bereits erlaubte Nutzer.\n\n\
              Beispiel:\n\
              allow @freund:matrix.org"
                 .to_string()
@@ -96,7 +96,7 @@ pub fn handle_help(body: &str, show_restricted: bool) -> String {
              Entfernt einen Matrix-Nutzer aus der Erlaubtenliste.\n\
              Admins können nicht entfernt werden.\n\
              Alle Alerts des Nutzers werden dabei deaktiviert.\n\
-             Nur verfügbar für bereits erlaubte Nutzer (im privaten Chat).\n\n\
+             Nur verfügbar für bereits erlaubte Nutzer.\n\n\
              Beispiel:\n\
              disallow @freund:matrix.org"
                 .to_string()

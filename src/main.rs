@@ -180,7 +180,8 @@ async fn main() -> Result<()> {
                     || is_cmd(match_body, "help");
                 // Restricted commands: require the sender to be on the allowed list.
                 let is_restricted_cmd = is_cmd(match_body, "alerts")
-                    || (is_direct && (is_cmd(match_body, "allow") || is_cmd(match_body, "disallow")));
+                    || is_cmd(match_body, "allow")
+                    || is_cmd(match_body, "disallow");
 
                 if !is_public_cmd && !is_restricted_cmd {
                     return;

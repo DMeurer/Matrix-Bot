@@ -1,25 +1,44 @@
 # Matrix Bot
 
-A Matrix bot written in Rust that scrapes and displays the weekly lunch menu for the Mensa Furtwangen (Hochschule Furtwangen University cafeteria).
+A Matrix bot written in Rust. It shows the weekly lunch menu for Mensa Furtwangen (HFU) and monitors websites for changes, sending a notification whenever a tracked value updates.
 
 ## Features
 
-- Fetches the current week's menu from [swfr.de](https://www.swfr.de/essen/mensen-cafes-speiseplaene/mensa-furtwangen)
-- Shows today's meals, a specific day, or the full week
-- Works in private chats (DMs) and group rooms
-- Automatically accepts room invites
-- Persists login session across restarts (no re-login on redeploy)
-- E2EE support via matrix-sdk
+- **Mensa menu** — fetches the current week's menu from [swfr.de](https://www.swfr.de/essen/mensen-cafes-speiseplaene/mensa-furtwangen); show today, a specific day, or the full week
+- **Website alerts** — monitor any element on any page; get notified when its text, HTML, or any attribute changes
+- **Access control** — admin users (set via env) plus a mutable allow-list
+- **Works in DMs and group rooms** — no prefix needed in DMs; prefix with the bot name in group rooms
+- **Auto-join** — accepts room invites automatically
+- **Persistent session** — login is saved to disk; no new device created on redeploy
+- **E2EE** — end-to-end encryption via matrix-sdk
 
-## Commands
+---
 
-| Context | Command | Result |
-|---|---|---|
-| DM | `mensa` | Today's menu |
-| DM | `mensa 0` | Full week |
-| DM | `mensa 1`–`mensa 6` | Specific day (Mon–Sat) |
-| Group room | `<botname> mensa` | Today's menu |
-| Group room | `<botname> mensa 0` | Full week |
+## Configuration
+
+Copy `.env.example` to `.env` and fill in your values:
+
+```env
+MATRIX_HOMESERVER=https://matrix.example.com
+MATRIX_USERNAME=@bot:example.com
+MATRIX_PASSWORD=your-password
+
+# Optional — defaults to the local part of MATRIX_USERNAME
+BOT_NAME=bot
+
+# Comma-separated list of Matrix IDs that always have full access
+ADMIN_USERS=@you:example.com,@other:example.com
+
+# Template for change notifications — all placeholders are optional
+ALERT_TEMPLATE=Alert {name} changed\n\nOld: {old}\nNew: {new}
+
+# Log level
+RUST_LOG=info,matrix_sdk_crypto=error
+```
+
+**Template placeholders:** `{name}`, `{url}`, `{old}`, `{new}`, `{css}`, `{property}`
+
+---
 
 ## Deployment
 
@@ -36,50 +55,44 @@ A Matrix bot written in Rust that scrapes and displays the weekly lunch menu for
    cd /opt/matrix-bot
    ```
 
-2. Create your `.env` file from the example:
+2. Create and fill in your `.env`:
    ```bash
    cp .env.example .env
+   $EDITOR .env
    ```
 
-3. Fill in your credentials in `.env`:
-   ```env
-   MATRIX_HOMESERVER=https://matrix.example.com
-   MATRIX_USERNAME=@bot:example.com
-   MATRIX_PASSWORD=your-password
-   BOT_NAME=bot                          # optional, defaults to local part of username
-   RUST_LOG=info,matrix_sdk_crypto=error
-   ```
-
-4. Start the bot:
+3. Start the bot:
    ```bash
    docker compose up -d
    ```
 
-The bot will log in, save its session to `./session/`, and start listening for messages. The session persists across restarts — the bot will not create a new device on every redeploy.
+The bot logs in, saves its session to `./session/`, and starts listening. The `session/` directory is bind-mounted so it survives container rebuilds.
 
 ### Automatic updates
 
-A cron job can poll for new commits every minute and rebuild automatically.
+A cron job polls for new commits every minute and rebuilds automatically with zero downtime.
 
-1. Activate the cron job:
+1. Make sure the current user can run `docker` without `sudo`:
    ```bash
-   crontab -e
+   sudo usermod -aG docker $USER
+   newgrp docker          # activates the group without logging out
    ```
 
-2. Add this line:
+2. Add to crontab (`crontab -e`):
    ```
    * * * * * sh /opt/matrix-bot/deployment/cronjob.sh
    ```
 
-When a new commit is pushed to `main`, the cron job will pull the changes and run `docker compose up -d --build` with zero downtime. Logs are written to `deployment/logs/cronjob.log`.
+When a new commit lands on `main`, the job pulls the changes and runs `docker compose up -d --no-deps --build`. Concurrent runs are prevented by a lockfile. Logs are written to `deployment/logs/cronjob.log`.
 
 ### Manual redeploy
 
 ```bash
-cd /opt/matrix-bot
 git pull
 docker compose up -d --build
 ```
+
+---
 
 ## Development
 
