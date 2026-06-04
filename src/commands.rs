@@ -1,5 +1,7 @@
 use chrono::{Datelike, Local, Weekday};
 
+use crate::access::AccessControl;
+
 pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
     match arg {
         None | Some("") => {
@@ -27,7 +29,9 @@ pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
     }
 }
 
-pub fn handle_help(body: &str) -> String {
+/// `show_restricted` should be true when the caller is an allowed user in a DM,
+/// which unlocks the `allow`/`disallow` entries in the command list.
+pub fn handle_help(body: &str, show_restricted: bool) -> String {
     let arg = body
         .splitn(2, ' ')
         .nth(1)
@@ -36,11 +40,26 @@ pub fn handle_help(body: &str) -> String {
 
     match arg {
         None => {
-            "Verfügbare Befehle:\n\n\
-             mensa <tag>    – Zeigt den Speiseplan der Mensa Furtwangen\n\
-             help <befehl>  – Zeigt Hilfe zu einem Befehl\n\n\
-             Tipp: `help <befehl>` für mehr Details"
-                .to_string()
+            let public_cmds = "mensa <tag>         – Zeigt den Speiseplan der Mensa Furtwangen\n\
+                               help <befehl>       – Zeigt Hilfe zu einem Befehl";
+            let restricted_cmds =
+                "allow <@nutzer>     – Nutzer zur Erlaubtenliste hinzufügen\n\
+                 disallow <@nutzer>  – Nutzer aus der Erlaubtenliste entfernen";
+
+            if show_restricted {
+                format!(
+                    "Verfügbare Befehle:\n\n\
+                     {public_cmds}\n\
+                     {restricted_cmds}\n\n\
+                     Tipp: `help <befehl>` für mehr Details"
+                )
+            } else {
+                format!(
+                    "Verfügbare Befehle:\n\n\
+                     {public_cmds}\n\n\
+                     Tipp: `help <befehl>` für mehr Details"
+                )
+            }
         }
         Some("mensa") => {
             "mensa <tag>\n\n\
@@ -60,9 +79,45 @@ pub fn handle_help(body: &str) -> String {
              mensa 3  → Mittwoch"
                 .to_string()
         }
-        Some(s) => {
-            format!("Unbekannter Befehl: \"{s}\". Verfügbare Befehle: mensa")
+        Some("allow") => {
+            "allow <@nutzer:server>\n\n\
+             Fügt einen Matrix-Nutzer zur Erlaubtenliste hinzu.\n\
+             Nur verfügbar für bereits erlaubte Nutzer (im privaten Chat).\n\n\
+             Beispiel:\n\
+             allow @freund:matrix.org"
+                .to_string()
         }
+        Some("disallow") => {
+            "disallow <@nutzer:server>\n\n\
+             Entfernt einen Matrix-Nutzer aus der Erlaubtenliste.\n\
+             Admins können nicht entfernt werden.\n\
+             Nur verfügbar für bereits erlaubte Nutzer (im privaten Chat).\n\n\
+             Beispiel:\n\
+             disallow @freund:matrix.org"
+                .to_string()
+        }
+        Some(s) => {
+            let known = if show_restricted {
+                "mensa, allow, disallow"
+            } else {
+                "mensa"
+            };
+            format!("Unbekannter Befehl: \"{s}\". Verfügbare Befehle: {known}")
+        }
+    }
+}
+
+pub fn handle_allow(body: &str, access: &mut AccessControl) -> String {
+    match body.splitn(2, ' ').nth(1).map(str::trim).filter(|s| !s.is_empty()) {
+        None => "Verwendung: allow @nutzer:server".to_string(),
+        Some(user_id) => access.add_user(user_id),
+    }
+}
+
+pub fn handle_disallow(body: &str, access: &mut AccessControl) -> String {
+    match body.splitn(2, ' ').nth(1).map(str::trim).filter(|s| !s.is_empty()) {
+        None => "Verwendung: disallow @nutzer:server".to_string(),
+        Some(user_id) => access.remove_user(user_id),
     }
 }
 
@@ -130,15 +185,24 @@ mod tests {
     }
 
     #[test]
-    fn help_no_arg_lists_commands() {
-        let result = handle_help("help");
+    fn help_no_arg_public() {
+        let result = handle_help("help", false);
         assert!(result.contains("mensa"));
         assert!(result.contains("help"));
+        assert!(!result.contains("allow"));
+    }
+
+    #[test]
+    fn help_no_arg_restricted_shows_extra_cmds() {
+        let result = handle_help("help", true);
+        assert!(result.contains("mensa"));
+        assert!(result.contains("allow"));
+        assert!(result.contains("disallow"));
     }
 
     #[test]
     fn help_mensa_shows_days() {
-        let result = handle_help("help mensa");
+        let result = handle_help("help mensa", false);
         assert!(result.contains("Montag"));
         assert!(result.contains("Samstag"));
         assert!(result.contains("mensa 0"));
@@ -146,7 +210,7 @@ mod tests {
 
     #[test]
     fn help_unknown_command() {
-        let result = handle_help("help foobar");
+        let result = handle_help("help foobar", false);
         assert!(result.contains("foobar"));
     }
 }

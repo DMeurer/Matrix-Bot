@@ -1,3 +1,4 @@
+mod access;
 mod commands;
 mod mensa;
 
@@ -16,7 +17,8 @@ use matrix_sdk::{
         },
     },
 };
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -74,6 +76,21 @@ async fn main() -> Result<()> {
 
     tracing::info!("Running as {username}");
 
+    // Build the access-control list from ADMIN_USERS env var + persisted allowed_users.json
+    let admins: Vec<String> = env::var("ADMIN_USERS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if admins.is_empty() {
+        tracing::warn!("ADMIN_USERS is not set — no one can use restricted commands");
+    }
+    let access = Arc::new(Mutex::new(access::AccessControl::load(
+        session_dir.join("allowed_users.json"),
+        admins,
+    )));
+
     let startup_ts = MilliSecondsSinceUnixEpoch::now();
 
     client.add_event_handler(
@@ -90,8 +107,10 @@ async fn main() -> Result<()> {
 
     client.add_event_handler({
         let bot_name = bot_name.to_lowercase();
+        let access = Arc::clone(&access);
         move |ev: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
             let bot_name = bot_name.clone();
+            let access = Arc::clone(&access);
             async move {
                 if room.state() != RoomState::Joined {
                     return;
@@ -124,29 +143,48 @@ async fn main() -> Result<()> {
                     body == cmd || body.starts_with(&format!("{cmd} "))
                 };
 
-                // In DMs trigger on "mensa …" / "help …"
-                // In group rooms trigger on "<botname> mensa …" / "<botname> help …"
+                // In group rooms require the bot name prefix and strip it before matching.
+                // In DMs no prefix is needed.
+                let prefix = format!("{bot_name} ");
                 let command_body: &str = if is_direct {
-                    if is_cmd(&body_lower, "mensa") || is_cmd(&body_lower, "help") {
-                        body_lower.as_str()
-                    } else {
-                        return;
-                    }
+                    &body_lower
                 } else {
-                    let prefix = format!("{bot_name} ");
-                    if is_cmd(&body_lower, &format!("{bot_name} mensa"))
-                        || is_cmd(&body_lower, &format!("{bot_name} help"))
-                    {
-                        body_lower.strip_prefix(&prefix).unwrap_or(&body_lower)
-                    } else {
-                        return;
+                    match body_lower.strip_prefix(&prefix) {
+                        Some(stripped) => stripped,
+                        None => return,
                     }
                 };
 
+                // Public commands: no auth required, work in DMs and group rooms.
+                let is_public_cmd = is_cmd(command_body, "mensa")
+                    || is_cmd(command_body, "help");
+                // Restricted commands: require the sender to be on the allowed list.
+                // Only available in DMs to avoid leaking user management in group chats.
+                let is_restricted_cmd = is_direct
+                    && (is_cmd(command_body, "allow") || is_cmd(command_body, "disallow"));
+
+                if !is_public_cmd && !is_restricted_cmd {
+                    return;
+                }
+
                 let mut response = if command_body.starts_with("mensa") {
                     commands::handle_mensa(command_body).await
+                } else if command_body.starts_with("help") {
+                    let show_restricted = is_direct
+                        && access.lock().await.is_allowed(ev.sender.as_str());
+                    commands::handle_help(command_body, show_restricted)
                 } else {
-                    commands::handle_help(command_body)
+                    // Restricted command — verify the sender is allowed
+                    let mut ac = access.lock().await;
+                    if !ac.is_allowed(ev.sender.as_str()) {
+                        "Du bist nicht berechtigt, diesen Befehl zu verwenden.".to_string()
+                    } else if command_body.starts_with("allow") {
+                        commands::handle_allow(command_body, &mut ac)
+                    } else if command_body.starts_with("disallow") {
+                        commands::handle_disallow(command_body, &mut ac)
+                    } else {
+                        return;
+                    }
                 };
 
                 if is_rlo {
