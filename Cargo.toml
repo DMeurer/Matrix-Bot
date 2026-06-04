@@ -18,3 +18,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # bundle SQLite so it doesn't need a system install
 libsqlite3-sys = { version = "0.27", features = ["bundled"] }
+rusqlite = "0.30"
+cron = "0.12"

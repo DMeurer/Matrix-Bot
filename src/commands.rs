@@ -1,6 +1,8 @@
 use chrono::{Datelike, Local, Weekday};
+use std::sync::Arc;
 
 use crate::access::AccessControl;
+use crate::alerts::AlertDb;
 
 pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
     match arg {
@@ -29,21 +31,23 @@ pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
     }
 }
 
-/// `show_restricted` should be true when the caller is an allowed user in a DM,
-/// which unlocks the `allow`/`disallow` entries in the command list.
+/// `show_restricted` should be true when the caller is an allowed user,
+/// which unlocks the `allow`/`disallow`/`alerts` entries in the command list.
 pub fn handle_help(body: &str, show_restricted: bool) -> String {
-    let arg = body
+    // Lowercase the argument so `help Mensa`, `help ALERTS CREATE` etc. all work
+    let arg_owned = body
         .splitn(2, ' ')
         .nth(1)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+        .map(|s| s.trim().to_lowercase());
+    let arg = arg_owned.as_deref().filter(|s| !s.is_empty());
 
     match arg {
         None => {
             let public_cmds = "mensa <tag>         – Zeigt den Speiseplan der Mensa Furtwangen\n\
                                help <befehl>       – Zeigt Hilfe zu einem Befehl";
             let restricted_cmds =
-                "allow <@nutzer>     – Nutzer zur Erlaubtenliste hinzufügen\n\
+                "alerts <befehl>     – Website-Änderungen überwachen\n\
+                 allow <@nutzer>     – Nutzer zur Erlaubtenliste hinzufügen\n\
                  disallow <@nutzer>  – Nutzer aus der Erlaubtenliste entfernen";
 
             if show_restricted {
@@ -91,14 +95,69 @@ pub fn handle_help(body: &str, show_restricted: bool) -> String {
             "disallow <@nutzer:server>\n\n\
              Entfernt einen Matrix-Nutzer aus der Erlaubtenliste.\n\
              Admins können nicht entfernt werden.\n\
+             Alle Alerts des Nutzers werden dabei deaktiviert.\n\
              Nur verfügbar für bereits erlaubte Nutzer (im privaten Chat).\n\n\
              Beispiel:\n\
              disallow @freund:matrix.org"
                 .to_string()
         }
+        Some("alerts") => {
+            "alerts <befehl>\n\n\
+             Überwacht Websites auf Änderungen und sendet Benachrichtigungen.\n\
+             Nur verfügbar für erlaubte Nutzer.\n\n\
+             Unterbefehle:\n\
+             alerts list                              – Deine Alerts\n\
+             alerts list-all                          – Alle Alerts\n\
+             alerts info <name>                       – Details zu einem Alert\n\
+             alerts create …                          – Neuen Alert erstellen (→ help alerts create)\n\
+             alerts update <name> <feld> [wert]       – Felder: url, css, property, schedule, room, name\n\
+             alerts update <name> room                – Raum auf aktuellen Raum setzen\n\
+             alerts enable <name>                     – Alert aktivieren\n\
+             alerts disable <name>                    – Alert deaktivieren\n\
+             alerts remove <name>                     – Alert löschen\n\
+             alerts cleanup                           – Alle deaktivierten Alerts löschen\n\n\
+             Tipp: `help alerts create` für eine ausführliche Erklärung der Parameter."
+                .to_string()
+        }
+        Some("alerts create") => {
+            "alerts create <name> <url> <css> <property> <schedule>\n\n\
+             Erstellt einen neuen Alert, der eine Website periodisch auf Änderungen prüft.\n\
+             Beim Erstellen wird sofort ein erster Abruf durchgeführt und der aktuelle\n\
+             Wert als Baseline gespeichert.\n\n\
+             Parameter:\n\n\
+             <name>\n\
+               Eindeutiger Name für den Alert. Keine Leerzeichen.\n\
+               Beispiel: preis-tracker\n\n\
+             <url>\n\
+               Die vollständige URL der zu überwachenden Seite.\n\
+               Beispiel: https://shop.example.de/produkt\n\n\
+             <css>\n\
+               CSS-Selektor des HTML-Elements, dessen Wert überwacht werden soll.\n\
+               Bei Leerzeichen im Selektor in Anführungszeichen einschließen.\n\
+               Beispiele: .price     \"#main .product-price\"     h1\n\n\
+             <property>\n\
+               Welcher Wert des Elements ausgelesen wird:\n\
+               innerText  – sichtbarer Text (häufigste Wahl)\n\
+               innerHTML  – kompletter HTML-Inhalt\n\
+               href       – Linkziel (bei <a>-Elementen)\n\
+               src        – Bildquelle (bei <img>-Elementen)\n\
+               <attr>     – beliebiges HTML-Attribut, z.B. data-price\n\n\
+             <schedule>\n\
+               Prüfintervall als Cron-Ausdruck (5 Felder: min std tag monat wochentag).\n\
+               Bei Leerzeichen im Ausdruck in Anführungszeichen einschließen.\n\
+               Felder können * (jeder Wert), */n (alle n), n-m (Bereich) enthalten.\n\
+               Beispiele:\n\
+               \"*/15 * * * *\"    – alle 15 Minuten\n\
+               \"0 8 * * 1-5\"     – täglich um 08:00 Uhr (Mo–Fr)\n\
+               \"0 */2 * * *\"     – alle 2 Stunden\n\
+               \"0 9 * * 1\"       – montags um 09:00 Uhr\n\n\
+             Vollständiges Beispiel:\n\
+             alerts create preis https://shop.de \".product-price\" innerText \"0 8 * * 1-5\""
+                .to_string()
+        }
         Some(s) => {
             let known = if show_restricted {
-                "mensa, allow, disallow"
+                "mensa, alerts, allow, disallow"
             } else {
                 "mensa"
             };
@@ -114,10 +173,27 @@ pub fn handle_allow(body: &str, access: &mut AccessControl) -> String {
     }
 }
 
-pub fn handle_disallow(body: &str, access: &mut AccessControl) -> String {
-    match body.splitn(2, ' ').nth(1).map(str::trim).filter(|s| !s.is_empty()) {
-        None => "Verwendung: disallow @nutzer:server".to_string(),
-        Some(user_id) => access.remove_user(user_id),
+pub async fn handle_disallow(
+    body: &str,
+    access: &mut AccessControl,
+    alert_db: &Arc<AlertDb>,
+) -> String {
+    let user_id = match body.splitn(2, ' ').nth(1).map(str::trim).filter(|s| !s.is_empty()) {
+        None => return "Verwendung: disallow @nutzer:server".to_string(),
+        Some(id) => id,
+    };
+    match access.remove_user(user_id) {
+        Err(msg) => msg,
+        Ok(removed_id) => {
+            // Disable all alerts created by the removed user
+            let disabled = alert_db.disable_by_creator(&removed_id).await.unwrap_or(0);
+            let alert_note = if disabled > 0 {
+                format!(" ({disabled} Alert(s) deaktiviert)")
+            } else {
+                String::new()
+            };
+            format!("{user_id} wurde aus der Erlaubtenliste entfernt.{alert_note}")
+        }
     }
 }
 
@@ -196,8 +272,32 @@ mod tests {
     fn help_no_arg_restricted_shows_extra_cmds() {
         let result = handle_help("help", true);
         assert!(result.contains("mensa"));
+        assert!(result.contains("alerts"));
         assert!(result.contains("allow"));
         assert!(result.contains("disallow"));
+    }
+
+    #[test]
+    fn help_alerts_shows_subcommands() {
+        let result = handle_help("help alerts", true);
+        assert!(result.contains("list"));
+        assert!(result.contains("update"));
+        assert!(result.contains("remove"));
+        assert!(result.contains("help alerts create")); // directs to detailed help
+    }
+
+    #[test]
+    fn help_alerts_create_shows_all_params() {
+        let result = handle_help("help alerts create", true);
+        assert!(result.contains("<name>"));
+        assert!(result.contains("<url>"));
+        assert!(result.contains("<css>"));
+        assert!(result.contains("<property>"));
+        assert!(result.contains("<schedule>"));
+        assert!(result.contains("innerText"));
+        assert!(result.contains("innerHTML"));
+        assert!(result.contains("href"));
+        assert!(result.contains("Cron"));
     }
 
     #[test]

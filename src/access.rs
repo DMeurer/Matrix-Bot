@@ -68,20 +68,22 @@ impl AccessControl {
         }
     }
 
-    pub fn remove_user(&mut self, user_id: &str) -> String {
+    /// Removes a user from the allowed list.
+    /// Returns `Ok(lowercase_user_id)` on success so the caller can perform
+    /// follow-up actions (e.g. disabling that user's alerts).
+    /// Returns `Err(message)` on failure.
+    pub fn remove_user(&mut self, user_id: &str) -> Result<String, String> {
         if self.is_admin(user_id) {
-            return format!("{user_id} ist ein Admin und kann nicht entfernt werden.");
+            return Err(format!("{user_id} ist ein Admin und kann nicht entfernt werden."));
         }
         let id = user_id.to_lowercase();
         let before = self.allowed.len();
         self.allowed.retain(|u| u.to_lowercase() != id);
         if self.allowed.len() == before {
-            return format!("{user_id} ist nicht in der Erlaubtenliste.");
+            return Err(format!("{user_id} ist nicht in der Erlaubtenliste."));
         }
-        match self.save() {
-            Ok(()) => format!("{user_id} wurde aus der Erlaubtenliste entfernt."),
-            Err(e) => format!("Fehler beim Speichern: {e}"),
-        }
+        self.save().map_err(|e| format!("Fehler beim Speichern: {e}"))?;
+        Ok(id)
     }
 }
 
@@ -120,16 +122,16 @@ mod tests {
     #[test]
     fn admin_cannot_be_removed() {
         let mut ac = make_ac(&["@admin:server"], &[]);
-        let msg = ac.remove_user("@admin:server");
-        assert!(msg.contains("Admin"));
+        let err = ac.remove_user("@admin:server").unwrap_err();
+        assert!(err.contains("Admin"));
         assert!(ac.is_allowed("@admin:server"));
     }
 
     #[test]
     fn remove_unknown_user_gives_error() {
         let mut ac = make_ac(&["@admin:server"], &[]);
-        let msg = ac.remove_user("@nobody:server");
-        assert!(msg.contains("nicht in der Erlaubtenliste"));
+        let err = ac.remove_user("@nobody:server").unwrap_err();
+        assert!(err.contains("nicht in der Erlaubtenliste"));
     }
 
     #[test]

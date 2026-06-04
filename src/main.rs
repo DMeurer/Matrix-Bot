@@ -1,4 +1,5 @@
 mod access;
+mod alerts;
 mod commands;
 mod mensa;
 
@@ -76,6 +77,17 @@ async fn main() -> Result<()> {
 
     tracing::info!("Running as {username}");
 
+    // Alert notification template
+    let alert_template = Arc::new(
+        env::var("ALERT_TEMPLATE").unwrap_or_else(|_| {
+            "Alert {name} changed\n\nOld: {old}\nNew: {new}".to_string()
+        }),
+    );
+
+    // Alert database
+    let alert_db = alerts::AlertDb::open(&session_dir.join("alerts.db"))
+        .expect("Failed to open alerts database");
+
     // Build the access-control list from ADMIN_USERS env var + persisted allowed_users.json
     let admins: Vec<String> = env::var("ADMIN_USERS")
         .unwrap_or_default()
@@ -108,9 +120,13 @@ async fn main() -> Result<()> {
     client.add_event_handler({
         let bot_name = bot_name.to_lowercase();
         let access = Arc::clone(&access);
+        let alert_db = Arc::clone(&alert_db);
+        let alert_template = Arc::clone(&alert_template);
         move |ev: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
             let bot_name = bot_name.clone();
             let access = Arc::clone(&access);
+            let alert_db = Arc::clone(&alert_db);
+            let alert_template = Arc::clone(&alert_template);
             async move {
                 if room.state() != RoomState::Joined {
                     return;
@@ -131,10 +147,10 @@ async fn main() -> Result<()> {
                 let raw_body = text_content.body.trim();
                 // U+202E Right-to-Left Override: if present, mirror it onto the response
                 let is_rlo = raw_body.starts_with('\u{202E}');
-                let body_lower = raw_body
-                    .trim_start_matches('\u{202E}')
-                    .trim()
-                    .to_lowercase();
+                // body_original preserves case for argument values (e.g. innerText, href)
+                // body_lower is used only for command routing
+                let body_original = raw_body.trim_start_matches('\u{202E}').trim();
+                let body_lower = body_original.to_lowercase();
                 let is_direct = room.is_direct().await.unwrap_or(false);
 
                 // Returns true if `body` is exactly `cmd` or starts with `cmd ` (with a space).
@@ -145,43 +161,61 @@ async fn main() -> Result<()> {
 
                 // In group rooms require the bot name prefix and strip it before matching.
                 // In DMs no prefix is needed.
+                // match_body  — lowercase, used for routing decisions
+                // handle_body — original case, passed to command handlers so argument values
+                //               like "innerText" or "href" are not silently lowercased
                 let prefix = format!("{bot_name} ");
-                let command_body: &str = if is_direct {
-                    &body_lower
+                let (match_body, handle_body): (&str, &str) = if is_direct {
+                    (&body_lower, body_original)
                 } else {
-                    match body_lower.strip_prefix(&prefix) {
-                        Some(stripped) => stripped,
-                        None => return,
+                    if body_lower.starts_with(&prefix) {
+                        (&body_lower[prefix.len()..], &body_original[prefix.len()..])
+                    } else {
+                        return;
                     }
                 };
 
                 // Public commands: no auth required, work in DMs and group rooms.
-                let is_public_cmd = is_cmd(command_body, "mensa")
-                    || is_cmd(command_body, "help");
+                let is_public_cmd = is_cmd(match_body, "mensa")
+                    || is_cmd(match_body, "help");
                 // Restricted commands: require the sender to be on the allowed list.
-                // Only available in DMs to avoid leaking user management in group chats.
-                let is_restricted_cmd = is_direct
-                    && (is_cmd(command_body, "allow") || is_cmd(command_body, "disallow"));
+                let is_restricted_cmd = is_cmd(match_body, "alerts")
+                    || (is_direct && (is_cmd(match_body, "allow") || is_cmd(match_body, "disallow")));
 
                 if !is_public_cmd && !is_restricted_cmd {
                     return;
                 }
 
-                let mut response = if command_body.starts_with("mensa") {
-                    commands::handle_mensa(command_body).await
-                } else if command_body.starts_with("help") {
-                    let show_restricted = is_direct
-                        && access.lock().await.is_allowed(ev.sender.as_str());
-                    commands::handle_help(command_body, show_restricted)
+                let sender = ev.sender.as_str();
+                let room_id = room.room_id().as_str();
+
+                tracing::debug!(
+                    "Command from {} in {}: {:?}",
+                    sender, room_id, handle_body
+                );
+
+                let mut response = if match_body.starts_with("mensa") {
+                    commands::handle_mensa(handle_body).await
+                } else if match_body.starts_with("help") {
+                    let show_restricted = access.lock().await.is_allowed(sender);
+                    commands::handle_help(handle_body, show_restricted)
                 } else {
-                    // Restricted command — verify the sender is allowed
-                    let mut ac = access.lock().await;
-                    if !ac.is_allowed(ev.sender.as_str()) {
+                    // Restricted — verify sender is allowed
+                    let is_allowed = access.lock().await.is_allowed(sender);
+                    if !is_allowed {
+                        tracing::warn!("Unauthorised command attempt by {sender}: {handle_body:?}");
                         "Du bist nicht berechtigt, diesen Befehl zu verwenden.".to_string()
-                    } else if command_body.starts_with("allow") {
-                        commands::handle_allow(command_body, &mut ac)
-                    } else if command_body.starts_with("disallow") {
-                        commands::handle_disallow(command_body, &mut ac)
+                    } else if match_body.starts_with("alerts") {
+                        alerts::commands::handle_alerts(
+                            handle_body, sender, room_id,
+                            &alert_db, &client, &alert_template,
+                        ).await
+                    } else if match_body.starts_with("allow") {
+                        let mut ac = access.lock().await;
+                        commands::handle_allow(handle_body, &mut ac)
+                    } else if match_body.starts_with("disallow") {
+                        let mut ac = access.lock().await;
+                        commands::handle_disallow(handle_body, &mut ac, &alert_db).await
                     } else {
                         return;
                     }
@@ -200,6 +234,16 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // Launch the alert scheduler background task
+    {
+        let db = Arc::clone(&alert_db);
+        let tmpl = Arc::clone(&alert_template);
+        let c = client.clone();
+        tokio::spawn(async move {
+            alerts::scheduler::run_scheduler(db, c, tmpl).await;
+        });
+    }
 
     tracing::info!("Starting sync loop");
 
