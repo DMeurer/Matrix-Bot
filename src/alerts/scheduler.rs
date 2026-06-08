@@ -75,16 +75,17 @@ pub async fn run_check(alert: &Alert, db: &AlertDb, client: &Client, template: &
     let now = Utc::now().timestamp();
     tracing::debug!("Checking alert \"{}\" ({})", alert.name, alert.url);
 
+    // Stamp last_checked immediately so the 30s scheduler loop cannot re-fire this
+    // alert while a slow fetch (5 attempts × retry delay = up to ~50s) is in flight.
+    db.update_last_checked(&alert.name, now).await.ok();
+
     match fetch_value(&alert.url, &alert.css, &alert.property).await {
         Err(e) => {
             tracing::warn!("Alert \"{}\": fetch failed — {e}", alert.name);
             let msg = format!("⚠️ Alert \"{}\" fehlgeschlagen\n\n{}", alert.name, e);
             send_to_room(client, &alert.room_id, &msg).await;
-            // still update last_checked so we don't re-fire every 30s
-            db.update_last_checked(&alert.name, now).await.ok();
         }
         Ok(new_value) => {
-            db.update_last_checked(&alert.name, now).await.ok();
 
             let old_value = match &alert.last_value {
                 Some(v) => v.clone(),
