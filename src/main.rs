@@ -21,6 +21,31 @@ use matrix_sdk::{
 use std::{env, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+/// Enable encryption in a room if it isn't already encrypted.
+/// Called after every successful join so all rooms the bot participates in
+/// are encrypted. Logs a warning if it fails (e.g. insufficient power level)
+/// but does not abort the join.
+async fn enable_encryption_if_needed(room: &Room) {
+    match room.is_encrypted().await {
+        Ok(true) => {} // already encrypted, nothing to do
+        Ok(false) => {
+            tracing::info!("Enabling encryption in {}", room.room_id());
+            if let Err(e) = room.enable_encryption().await {
+                tracing::warn!(
+                    "Could not enable encryption in {}: {e}",
+                    room.room_id()
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Could not check encryption state for {}: {e}",
+                room.room_id()
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -113,7 +138,9 @@ async fn main() -> Result<()> {
             tracing::info!("Joining room {}", room.room_id());
             if let Err(e) = room.join().await {
                 tracing::error!("Failed to join room {}: {e}", room.room_id());
+                return;
             }
+            enable_encryption_if_needed(&room).await;
         },
     );
 
@@ -256,7 +283,9 @@ async fn main() -> Result<()> {
         tracing::info!("Joining pending invite: {}", room.room_id());
         if let Err(e) = room.join().await {
             tracing::error!("Failed to join {}: {e}", room.room_id());
+            continue;
         }
+        enable_encryption_if_needed(&room).await;
     }
 
     client.sync(SyncSettings::default()).await?;

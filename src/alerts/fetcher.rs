@@ -39,9 +39,21 @@ pub async fn fetch_value(url: &str, css: &str, property: &str) -> Result<String>
 async fn try_fetch(url: &str, css: &str, property: &str) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
         .build()?;
 
-    let html = client.get(url).send().await?.text().await?;
+    let response = client.get(url).send().await?;
+    let status = response.status();
+    let html = response.text().await?;
+
+    tracing::debug!(
+        "Fetched {url} — HTTP {status}, {} bytes",
+        html.len()
+    );
+
+    if !status.is_success() {
+        return Err(anyhow!("HTTP {status} for {url}"));
+    }
 
     extract_value(&html, css, property)
 }
