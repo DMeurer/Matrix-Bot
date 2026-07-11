@@ -4,7 +4,24 @@ use std::sync::Arc;
 use crate::access::AccessControl;
 use crate::alerts::AlertDb;
 
-pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
+/// Parse the `mensa` argument into a `(week, days)` pair.
+///
+/// The argument is a number `N` where the tens digit is the week offset
+/// (0 = current, 1 = next, 2 = in two weeks) and the ones digit is the day
+/// (0 = whole week Mo–Sa, 1–6 = Mo–Sa). No argument shows today.
+///
+/// Examples: `0` → this week, all · `3` → this week, Wed · `10` → next week, all
+/// · `12` → next week, Tue · `20` → in two weeks, all.
+pub fn parse_mensa_arg(arg: Option<&str>) -> Result<(usize, Vec<usize>), String> {
+    let invalid = |s: &str| {
+        format!(
+            "Ungültiges Argument: \"{s}\". Format: <Woche><Tag>. \
+             Woche 0 (diese), 1 (nächste), 2 (übernächste); \
+             Tag 0 (alle) oder 1–6 (Mo–Sa). \
+             Beispiele: 0 (diese Woche), 3 (Mi), 10 (nächste Woche), 12 (nächste Woche Di)."
+        )
+    };
+
     match arg {
         None | Some("") => {
             let day = match Local::now().weekday() {
@@ -16,18 +33,22 @@ pub fn parse_mensa_arg(arg: Option<&str>) -> Result<Vec<usize>, String> {
                 Weekday::Sat => 6,
                 Weekday::Sun => 1,
             };
-            Ok(vec![day])
+            Ok((0, vec![day]))
         }
-        Some("0") => Ok(vec![1, 2, 3, 4, 5, 6]),
-        Some("1") => Ok(vec![1]),
-        Some("2") => Ok(vec![2]),
-        Some("3") => Ok(vec![3]),
-        Some("4") => Ok(vec![4]),
-        Some("5") => Ok(vec![5]),
-        Some("6") => Ok(vec![6]),
-        Some(s) => Err(format!(
-            "Ungültiges Argument: \"{s}\". Verwende 0 (alle Tage), 1–6 (Mo–Sa) oder kein Argument (heute)."
-        )),
+        Some(s) => {
+            let n: usize = s.parse().map_err(|_| invalid(s))?;
+            let week = n / 10;
+            let day = n % 10;
+            if week > 2 {
+                return Err(invalid(s));
+            }
+            let days = match day {
+                0 => vec![1, 2, 3, 4, 5, 6],
+                1..=6 => vec![day],
+                _ => return Err(invalid(s)),
+            };
+            Ok((week, days))
+        }
     }
 }
 
@@ -66,21 +87,26 @@ pub fn handle_help(body: &str, show_restricted: bool) -> String {
             }
         }
         Some("mensa") => {
-            "mensa <tag>\n\n\
+            "mensa <auswahl>\n\n\
              Zeigt den Speiseplan der Mensa Furtwangen (HFU).\n\n\
+             Die Auswahl ist eine Zahl <Woche><Tag>:\n\
+             Zehnerstelle = Woche  – 0 diese, 1 nächste, 2 übernächste\n\
+             Einerstelle  = Tag    – 0 ganze Woche, 1–6 Mo–Sa\n\n\
              Parameter:\n\
-             (kein)  – Heutiger Tag\n\
+             (kein)  – Heutiger Tag (diese Woche)\n\
              0       – Ganze Woche (Mo–Sa)\n\
-             1       – Montag\n\
-             2       – Dienstag\n\
-             3       – Mittwoch\n\
-             4       – Donnerstag\n\
-             5       – Freitag\n\
-             6       – Samstag\n\n\
+             1–6     – Mo–Sa (diese Woche)\n\
+             10      – Ganze nächste Woche\n\
+             11–16   – Mo–Sa (nächste Woche)\n\
+             20      – Ganze übernächste Woche\n\
+             21–26   – Mo–Sa (übernächste Woche)\n\n\
              Beispiele:\n\
-             mensa    → Heute\n\
-             mensa 0  → Ganze Woche\n\
-             mensa 3  → Mittwoch"
+             mensa     → Heute\n\
+             mensa 0   → Ganze Woche\n\
+             mensa 3   → Mittwoch (diese Woche)\n\
+             mensa 10  → Ganze nächste Woche\n\
+             mensa 12  → Dienstag (nächste Woche)\n\
+             mensa 20  → Ganze übernächste Woche"
                 .to_string()
         }
         Some("allow") => {
@@ -204,13 +230,13 @@ pub async fn handle_mensa(body: &str) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let days = match parse_mensa_arg(arg) {
-        Ok(days) => days,
+    let (week, days) = match parse_mensa_arg(arg) {
+        Ok(v) => v,
         Err(e) => return e,
     };
 
-    match crate::mensa::load_meals().await {
-        Ok(meals) => crate::mensa::format_meals(&meals, &days),
+    match crate::mensa::load_meals_for_week(week).await {
+        Ok(meals) => crate::mensa::format_meals(&meals, &days, week),
         Err(e) => {
             tracing::error!("Failed to load meals: {e}");
             "Fehler beim Laden des Mensaplans. Bitte später versuchen.".to_string()
@@ -224,8 +250,9 @@ mod tests {
 
     #[test]
     fn parse_day_arg_today() {
-        let result = parse_mensa_arg(None).unwrap();
-        assert_eq!(result.len(), 1);
+        let (week, days) = parse_mensa_arg(None).unwrap();
+        assert_eq!(week, 0);
+        assert_eq!(days.len(), 1);
         let expected = match Local::now().weekday() {
             Weekday::Mon => 1,
             Weekday::Tue => 2,
@@ -235,29 +262,50 @@ mod tests {
             Weekday::Sat => 6,
             Weekday::Sun => 1,
         };
-        assert_eq!(result[0], expected);
+        assert_eq!(days[0], expected);
     }
 
     #[test]
     fn parse_day_arg_all() {
-        let result = parse_mensa_arg(Some("0")).unwrap();
-        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(parse_mensa_arg(Some("0")).unwrap(), (0, vec![1, 2, 3, 4, 5, 6]));
     }
 
     #[test]
     fn parse_day_arg_monday() {
-        assert_eq!(parse_mensa_arg(Some("1")).unwrap(), vec![1]);
+        assert_eq!(parse_mensa_arg(Some("1")).unwrap(), (0, vec![1]));
     }
 
     #[test]
     fn parse_day_arg_saturday() {
-        assert_eq!(parse_mensa_arg(Some("6")).unwrap(), vec![6]);
+        assert_eq!(parse_mensa_arg(Some("6")).unwrap(), (0, vec![6]));
+    }
+
+    #[test]
+    fn parse_next_week_all() {
+        assert_eq!(parse_mensa_arg(Some("10")).unwrap(), (1, vec![1, 2, 3, 4, 5, 6]));
+    }
+
+    #[test]
+    fn parse_next_week_tuesday() {
+        assert_eq!(parse_mensa_arg(Some("12")).unwrap(), (1, vec![2]));
+    }
+
+    #[test]
+    fn parse_two_weeks_all() {
+        assert_eq!(parse_mensa_arg(Some("20")).unwrap(), (2, vec![1, 2, 3, 4, 5, 6]));
+    }
+
+    #[test]
+    fn parse_two_weeks_saturday() {
+        assert_eq!(parse_mensa_arg(Some("26")).unwrap(), (2, vec![6]));
     }
 
     #[test]
     fn parse_day_arg_invalid() {
-        assert!(parse_mensa_arg(Some("7")).is_err());
-        assert!(parse_mensa_arg(Some("foo")).is_err());
+        assert!(parse_mensa_arg(Some("7")).is_err());   // day out of range
+        assert!(parse_mensa_arg(Some("17")).is_err());  // day out of range, week 1
+        assert!(parse_mensa_arg(Some("30")).is_err());  // week out of range
+        assert!(parse_mensa_arg(Some("foo")).is_err()); // not a number
     }
 
     #[test]
@@ -303,9 +351,10 @@ mod tests {
     #[test]
     fn help_mensa_shows_days() {
         let result = handle_help("help mensa", false);
-        assert!(result.contains("Montag"));
-        assert!(result.contains("Samstag"));
+        assert!(result.contains("Mo–Sa"));
+        assert!(result.contains("nächste Woche"));
         assert!(result.contains("mensa 0"));
+        assert!(result.contains("mensa 10"));
     }
 
     #[test]

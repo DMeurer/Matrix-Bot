@@ -82,13 +82,24 @@ pub fn parse_meal(text: &str) -> Meal {
     meal
 }
 
-pub async fn load_meals() -> Result<Meals> {
-    let body = reqwest::get(
-        "https://www.swfr.de/essen/mensen-cafes-speiseplaene/mensa-furtwangen",
-    )
-    .await?
-    .text()
-    .await?;
+/// URL of the Mensa Furtwangen menu for a given week offset.
+/// 0 = current week, 1 = next week, 2 = in two weeks.
+///
+/// The site is TYPO3-based and selects the week via the `weekToShow`
+/// parameter. TYPO3 requires a `cHash` that is a deterministic hash of the
+/// query parameters (no time component), so these values are stable and safe
+/// to hardcode — they are exactly the links the site's own navigation uses.
+fn week_url(week: usize) -> &'static str {
+    match week {
+        0 => "https://www.swfr.de/essen/mensen-cafes-speiseplaene/mensa-furtwangen",
+        1 => "https://www.swfr.de/essen/mensen-cafes-speiseplaene/mensa-furtwangen?tx_speiseplan_singlelocation%5Baction%5D=show&tx_speiseplan_singlelocation%5Bcontroller%5D=Speiseplan&tx_speiseplan_singlelocation%5BweekToShow%5D=1&cHash=22b059d3806babbc95ac85072e5fc543",
+        _ => "https://www.swfr.de/essen/mensen-cafes-speiseplaene/mensa-furtwangen?tx_speiseplan_singlelocation%5Baction%5D=show&tx_speiseplan_singlelocation%5Bcontroller%5D=Speiseplan&tx_speiseplan_singlelocation%5BweekToShow%5D=2&cHash=b1f2caea5fc9627783a04823a77e6c69",
+    }
+}
+
+/// Load the menu for the given week offset (0 = current, 1 = next, 2 = in two weeks).
+pub async fn load_meals_for_week(week: usize) -> Result<Meals> {
+    let body = reqwest::get(week_url(week)).await?.text().await?;
 
     parse_html_meals(&body)
 }
@@ -121,8 +132,13 @@ fn parse_html_meals(body: &str) -> Result<Meals> {
     Ok(meals)
 }
 
-pub fn format_meals(meals: &Meals, days: &[usize]) -> String {
-    let mut message = String::from("Mensa Furtwangen\n\n");
+pub fn format_meals(meals: &Meals, days: &[usize], week: usize) -> String {
+    let week_label = match week {
+        0 => "",
+        1 => " (nächste Woche)",
+        _ => " (in 2 Wochen)",
+    };
+    let mut message = format!("Mensa Furtwangen{week_label}\n\n");
 
     for &day in days {
         let (day_name, day_meals): (&str, &Vec<Meal>) = match day {
@@ -195,7 +211,7 @@ mod tests {
     #[test]
     fn format_empty_day() {
         let meals = Meals::default();
-        let result = format_meals(&meals, &[1]);
+        let result = format_meals(&meals, &[1], 0);
         assert!(result.contains("Mensa Furtwangen"));
         assert!(result.contains("Montag"));
     }
@@ -208,7 +224,7 @@ mod tests {
             price_students: "2.50 €".to_string(),
             ..Default::default()
         });
-        let result = format_meals(&meals, &[1]);
+        let result = format_meals(&meals, &[1], 0);
         assert!(result.contains("test essen"));
         assert!(result.contains("2.50 €"));
     }
