@@ -1,5 +1,5 @@
 use super::{Alert, AlertDb};
-use crate::alerts::fetcher::fetch_value;
+use crate::alerts::fetcher::{clean_text, fetch_value};
 use chrono::{TimeZone, Utc};
 use cron::Schedule;
 use matrix_sdk::{Client, ruma::OwnedRoomId};
@@ -88,7 +88,9 @@ pub async fn run_check(alert: &Alert, db: &AlertDb, client: &Client, template: &
         Ok(new_value) => {
 
             let old_value = match &alert.last_value {
-                Some(v) => v.clone(),
+                // Clean stored values too, so values saved before cleanup was
+                // introduced don't trigger a spurious change notification.
+                Some(v) => clean_text(v),
                 None => {
                     // First check after enable — just save the value, no notification
                     tracing::debug!("Alert \"{}\": initial value saved: {:?}", alert.name, new_value);
