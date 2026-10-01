@@ -10,6 +10,7 @@ use matrix_sdk::{
     matrix_auth::MatrixSession,
     ruma::{
         MilliSecondsSinceUnixEpoch,
+        api::client::uiaa,
         events::{
             room::member::StrippedRoomMemberEvent,
             room::message::{
@@ -43,6 +44,44 @@ async fn enable_encryption_if_needed(room: &Room) {
                 room.room_id()
             );
         }
+    }
+}
+
+/// Create and upload a cross-signing identity for the bot account if it has none,
+/// so the bot's device is signed by its owner and clients stop warning about it.
+/// The first attempt fails with a UIA challenge, which is answered with the
+/// account password.
+async fn setup_cross_signing(client: &Client, username: &str, password: &str) {
+    let encryption = client.encryption();
+
+    if let Err(e) = encryption.bootstrap_cross_signing_if_needed(None).await {
+        let Some(response) = e.as_uiaa_response() else {
+            tracing::warn!("Could not set up cross-signing: {e}");
+            return;
+        };
+        let mut auth = uiaa::Password::new(
+            uiaa::UserIdentifier::UserIdOrLocalpart(username.to_owned()),
+            password.to_owned(),
+        );
+        auth.session = response.session.clone();
+        if let Err(e) = encryption
+            .bootstrap_cross_signing(Some(uiaa::AuthData::Password(auth)))
+            .await
+        {
+            tracing::warn!("Could not set up cross-signing: {e}");
+            return;
+        }
+        tracing::info!("Created cross-signing identity");
+    }
+
+    match encryption.cross_signing_status().await {
+        Some(status) if status.has_self_signing => {
+            tracing::info!("Cross-signing ready");
+        }
+        _ => tracing::warn!(
+            "The account already has a cross-signing identity, but its keys are \
+             not available to the bot — its device stays unverified"
+        ),
     }
 }
 
@@ -101,6 +140,8 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("Running as {username}");
+
+    setup_cross_signing(&client, &username, &password).await;
 
     // Alert notification template
     let alert_template = Arc::new(
